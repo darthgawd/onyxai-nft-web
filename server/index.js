@@ -4,6 +4,11 @@ import cors from "cors";
 import axios from "axios";
 import crypto from "crypto";
 import FormData from "form-data";
+import fs from "fs-extra";
+import path from "path";
+import { Connection, clusterApiUrl, Keypair } from "@solana/web3.js";
+import { Metaplex, keypairIdentity } from "@metaplex-foundation/js";
+
 
 const app = express();
 app.use(cors());
@@ -135,7 +140,36 @@ function ipfsToHttps(uri) {
   return uri;
 }
 
-// 1) Generate (like genOneImage.js) but return to browser
+
+
+app.post("/api/mint", async (req, res) => {
+  try {
+    const { name, metadataUri } = req.body || {};
+    if (!metadataUri) return res.status(400).json({ error: "metadataUri required" });
+
+    const KEYPAIR_PATH = path.join(process.env.HOME, ".config/solana/id.json");
+    const secret = await fs.readJson(KEYPAIR_PATH);
+    const keypair = Keypair.fromSecretKey(Uint8Array.from(secret));
+
+    const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
+    const metaplex = Metaplex.make(connection).use(keypairIdentity(keypair));
+
+    const uri = ipfsToHttps(metadataUri);
+
+    const { nft } = await metaplex.nfts().create({
+      uri,
+      name: name || "OnyxAI NFT",
+      sellerFeeBasisPoints: 500,
+    });
+
+    res.json({ mint: nft.address.toBase58(), uri });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+
+// generate image
 app.post("/api/generate", async (req, res) => {
   try {
     const tokenId = Date.now();
