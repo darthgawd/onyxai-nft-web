@@ -1,7 +1,10 @@
+import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import { useWallet } from "@solana/wallet-adapter-react";
 import { useState } from "react";
 import "./index.css";
 
 export default function App() {
+  const wallet = useWallet();
   const [loadingGen, setLoadingGen] = useState(false);
   const [loadingUpload, setLoadingUpload] = useState(false);
   const [loadingMint, setLoadingMint] = useState(false);
@@ -47,6 +50,8 @@ export default function App() {
       setLoadingGen(false);
     }
   }
+
+
 
   async function uploadToPinata() {
     if (!tokenId || !image) return;
@@ -109,6 +114,14 @@ export default function App() {
     <div className="app">
       <div className="card">
         <h1>OnyxAI Generator & Minter (Devnet)</h1>
+		
+		
+		<div style={{ marginBottom: 12 }}>
+  <WalletMultiButton />
+  <div style={{ marginTop: 8, opacity: 0.85 }}>
+    Wallet: {wallet.connected ? "Connected ✅" : "Not connected"}
+  </div>
+</div>
 
         <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
           <button onClick={generateImage} disabled={loadingGen}>
