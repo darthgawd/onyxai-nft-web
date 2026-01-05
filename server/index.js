@@ -6,9 +6,34 @@ import crypto from "crypto";
 import FormData from "form-data";
 import fs from "fs-extra";
 import path from "path";
-import { Connection, clusterApiUrl, Keypair, PublicKey } from "@solana/web3.js";
+import {
+  Connection,
+  clusterApiUrl,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+} from "@solana/web3.js";
+import {
+  TOKEN_PROGRAM_ID,
+  MINT_SIZE,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+  createInitializeMintInstruction,
+  createMintToInstruction,
+} from "@solana/spl-token";
+
 import { Metaplex, keypairIdentity } from "@metaplex-foundation/js";
 
+// ✅ Umi + mpl-token-metadata (stable ESM API)
+import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
+import { publicKey as umiPublicKey } from "@metaplex-foundation/umi";
+import {
+  findMetadataPda,
+  findMasterEditionPda,
+  createMetadataAccountV3,
+  createMasterEditionV3,
+} from "@metaplex-foundation/mpl-token-metadata";
 
 const app = express();
 app.use(cors());
@@ -96,7 +121,9 @@ async function generateImage(prompt, seedValue) {
   }
   if (!contentType.startsWith("image/")) {
     const text = Buffer.from(res.data).toString("utf8");
-    throw new Error(`Unexpected content-type ${contentType} (${res.status}): ${text}`);
+    throw new Error(
+      `Unexpected content-type ${contentType} (${res.status}): ${text}`
+    );
   }
 
   return Buffer.from(res.data);
@@ -107,13 +134,17 @@ async function pinFileFromBuffer(buffer, filename, name, keyvalues = {}) {
   data.append("file", buffer, { filename, contentType: "image/png" });
   data.append("pinataMetadata", JSON.stringify({ name, keyvalues }));
 
-  const res = await axios.post("https://api.pinata.cloud/pinning/pinFileToIPFS", data, {
-    maxBodyLength: Infinity,
-    headers: {
-      Authorization: `Bearer ${PINATA_JWT}`,
-      ...data.getHeaders(),
-    },
-  });
+  const res = await axios.post(
+    "https://api.pinata.cloud/pinning/pinFileToIPFS",
+    data,
+    {
+      maxBodyLength: Infinity,
+      headers: {
+        Authorization: `Bearer ${PINATA_JWT}`,
+        ...data.getHeaders(),
+      },
+    }
+  );
 
   return res.data.IpfsHash;
 }
@@ -124,24 +155,150 @@ async function pinJSON(json, name, keyvalues = {}) {
     pinataContent: json,
   };
 
-  const res = await axios.post("https://api.pinata.cloud/pinning/pinJSONToIPFS", payload, {
-    headers: {
-      Authorization: `Bearer ${PINATA_JWT}`,
-      "Content-Type": "application/json",
-    },
-  });
+  const res = await axios.post(
+    "https://api.pinata.cloud/pinning/pinJSONToIPFS",
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${PINATA_JWT}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
 
   return res.data.IpfsHash;
 }
 
 function ipfsToHttps(uri) {
   if (!uri) return uri;
-  if (uri.startsWith("ipfs://")) return uri.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
+  if (uri.startsWith("ipfs://"))
+    return uri.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
   return uri;
 }
 
+// ✅ Build a transaction for Phantom to sign/pay fees
+app.post("/api/mintTx", async (req, res) => {
+  try {
+    const { name, metadataUri, owner } = req.body || {};
+    if (!metadataUri) return res.status(400).json({ error: "metadataUri required" });
+    if (!owner) return res.status(400).json({ error: "owner required" });
 
+    const payer = new PublicKey(owner);     // Phantom wallet
+    const mint = Keypair.generate();        // new mint account (server will partially sign)
 
+    const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
+    const uri = ipfsToHttps(metadataUri);
+
+    const ata = await getAssociatedTokenAddress(mint.publicKey, payer);
+
+    // rent for mint account
+    const lamportsForMint = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
+
+    const tx = new Transaction();
+
+    // 1) Create mint account
+    tx.add(
+      SystemProgram.createAccount({
+        fromPubkey: payer,
+        newAccountPubkey: mint.publicKey,
+        lamports: lamportsForMint,
+        space: MINT_SIZE,
+        programId: TOKEN_PROGRAM_ID,
+      })
+    );
+
+    // 2) Init mint
+    tx.add(createInitializeMintInstruction(mint.publicKey, 0, payer, payer));
+
+    // 3) Create ATA
+    tx.add(createAssociatedTokenAccountInstruction(payer, ata, payer, mint.publicKey));
+
+    // 4) Mint 1 token
+    tx.add(createMintToInstruction(mint.publicKey, ata, payer, 1));
+
+    // --- Umi builders for Token Metadata (NO CJS/ESM issues) ---
+    const umi = createUmi(clusterApiUrl("devnet"));
+
+    const umiMint = umiPublicKey(mint.publicKey.toBase58());
+    const umiPayer = umiPublicKey(payer.toBase58());
+
+    const metadataPda = findMetadataPda(umi, { mint: umiMint })[0];
+    const masterEditionPda = findMasterEditionPda(umi, { mint: umiMint })[0];
+
+    const mdIx = createMetadataAccountV3(umi, {
+      metadata: metadataPda,
+      mint: umiMint,
+      mintAuthority: umiPayer,
+      payer: umiPayer,
+      updateAuthority: umiPayer,
+      data: {
+        name: name || "OnyxAI NFT",
+        symbol: "ONYXAI",
+        uri,
+        sellerFeeBasisPoints: 500,
+        creators: null,
+        collection: null,
+        uses: null,
+      },
+      isMutable: true,
+      collectionDetails: null,
+    }).getInstructions()[0];
+
+    const meIx = createMasterEditionV3(umi, {
+      edition: masterEditionPda,
+      metadata: metadataPda,
+      mint: umiMint,
+      mintAuthority: umiPayer,
+      payer: umiPayer,
+      updateAuthority: umiPayer,
+      maxSupply: 0,
+    }).getInstructions()[0];
+
+    // Convert Umi instruction -> web3 TransactionInstruction
+    tx.add({
+      keys: mdIx.keys.map((k) => ({
+        pubkey: new PublicKey(k.pubkey),
+        isSigner: k.isSigner,
+        isWritable: k.isWritable,
+      })),
+      programId: new PublicKey(mdIx.programId),
+      data: Buffer.from(mdIx.data),
+    });
+
+    tx.add({
+      keys: meIx.keys.map((k) => ({
+        pubkey: new PublicKey(k.pubkey),
+        isSigner: k.isSigner,
+        isWritable: k.isWritable,
+      })),
+      programId: new PublicKey(meIx.programId),
+      data: Buffer.from(meIx.data),
+    });
+
+    // recent blockhash + fee payer
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = payer;
+
+    // server partially signs mint (Phantom signs as payer/mintAuthority)
+    tx.partialSign(mint);
+
+    const txBase64 = tx
+      .serialize({ requireAllSignatures: false })
+      .toString("base64");
+
+    res.json({
+      txBase64,
+      mint: mint.publicKey.toBase58(),
+      lastValidBlockHeight,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// ✅ Old server-keypair mint endpoint (optional fallback)
 app.post("/api/mint", async (req, res) => {
   try {
     const { name, metadataUri, owner } = req.body || {};
@@ -162,7 +319,7 @@ app.post("/api/mint", async (req, res) => {
       uri,
       name: name || "OnyxAI NFT",
       sellerFeeBasisPoints: 500,
-      tokenOwner: ownerPk, // ✅ THIS makes Phantom wallet the owner
+      tokenOwner: ownerPk,
     });
 
     res.json({ mint: nft.address.toBase58(), uri, owner });
@@ -170,8 +327,6 @@ app.post("/api/mint", async (req, res) => {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
-
-
 
 // generate image
 app.post("/api/generate", async (req, res) => {
@@ -202,28 +357,32 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-// 2) Upload image + metadata (mirrors pinataUpload.js but for ONE token)
+// upload image + metadata
 app.post("/api/upload", async (req, res) => {
   try {
     const { tokenId, imageBase64, prompt, attributes } = req.body;
-    if (!tokenId || !imageBase64) return res.status(400).json({ error: "tokenId and imageBase64 required" });
+    if (!tokenId || !imageBase64)
+      return res.status(400).json({ error: "tokenId and imageBase64 required" });
 
-    // decode base64 → buffer
     const base64Data = imageBase64.split(",")[1];
     const buffer = Buffer.from(base64Data, "base64");
 
-    // pin image
-    const imageHash = await pinFileFromBuffer(buffer, `${tokenId}.png`, `OnyxAI-Image-${tokenId}`, {
-      project: "onyxai-nft",
-      id: String(tokenId),
-      kind: "image",
-    });
+    const imageHash = await pinFileFromBuffer(
+      buffer,
+      `${tokenId}.png`,
+      `OnyxAI-Image-${tokenId}`,
+      {
+        project: "onyxai-nft",
+        id: String(tokenId),
+        kind: "image",
+      }
+    );
     const imageIpfsUri = `ipfs://${imageHash}`;
 
-    // build metadata like your script (image stored as HTTPS gateway)
     const metadata = {
       name: `OnyxAI #${tokenId}`,
-      description: "AI-generated NFT collection minted on Solana. Generated and uploaded via JavaScript automation.",
+      description:
+        "AI-generated NFT collection minted on Solana. Generated and uploaded via JavaScript automation.",
       image: ipfsToHttps(imageIpfsUri),
       attributes: [
         ...(attributes || []),
@@ -233,7 +392,6 @@ app.post("/api/upload", async (req, res) => {
       ],
     };
 
-    // pin metadata json
     const metaHash = await pinJSON(metadata, `OnyxAI-Metadata-${tokenId}`, {
       project: "onyxai-nft",
       id: String(tokenId),
@@ -255,3 +413,4 @@ app.post("/api/upload", async (req, res) => {
 });
 
 app.listen(5175, () => console.log("API running http://localhost:5175"));
+
