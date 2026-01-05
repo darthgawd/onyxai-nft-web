@@ -6,7 +6,7 @@ import crypto from "crypto";
 import FormData from "form-data";
 import fs from "fs-extra";
 import path from "path";
-import { Connection, clusterApiUrl, Keypair } from "@solana/web3.js";
+import { Connection, clusterApiUrl, Keypair, PublicKey } from "@solana/web3.js";
 import { Metaplex, keypairIdentity } from "@metaplex-foundation/js";
 
 
@@ -144,8 +144,9 @@ function ipfsToHttps(uri) {
 
 app.post("/api/mint", async (req, res) => {
   try {
-    const { name, metadataUri } = req.body || {};
+    const { name, metadataUri, owner } = req.body || {};
     if (!metadataUri) return res.status(400).json({ error: "metadataUri required" });
+    if (!owner) return res.status(400).json({ error: "owner required" });
 
     const KEYPAIR_PATH = path.join(process.env.HOME, ".config/solana/id.json");
     const secret = await fs.readJson(KEYPAIR_PATH);
@@ -155,18 +156,21 @@ app.post("/api/mint", async (req, res) => {
     const metaplex = Metaplex.make(connection).use(keypairIdentity(keypair));
 
     const uri = ipfsToHttps(metadataUri);
+    const ownerPk = new PublicKey(owner);
 
     const { nft } = await metaplex.nfts().create({
       uri,
       name: name || "OnyxAI NFT",
       sellerFeeBasisPoints: 500,
+      tokenOwner: ownerPk, // ✅ THIS makes Phantom wallet the owner
     });
 
-    res.json({ mint: nft.address.toBase58(), uri });
+    res.json({ mint: nft.address.toBase58(), uri, owner });
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
+
 
 
 // generate image

@@ -84,6 +84,12 @@ export default function App() {
   }
 
   async function mintNft() {
+  
+    if (!wallet.connected || !wallet.publicKey) {
+  setError("Connect Phantom first.");
+  return;
+}
+
     if (!metadataIpfsUri) return;
 
     setLoadingMint(true);
@@ -93,9 +99,10 @@ export default function App() {
       const res = await fetch(`${API}/api/mint`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: `OnyxAI #${tokenId}`,
-          metadataUri: metadataIpfsUri,
+   	 body: JSON.stringify({
+ 	 name: `OnyxAI #${tokenId}`,
+  	 metadataUri: metadataIpfsUri,
+  	 owner: wallet.publicKey.toBase58(),
         }),
       });
 
